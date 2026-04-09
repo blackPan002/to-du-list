@@ -1,16 +1,16 @@
 import asyncio
+import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-BOT_TOKEN = "8322782866:AAGIVaPDeU_dU601ryIm2qJltWXBBVcIV5M"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8322782866:AAGIVaPDeU_dU601ryIm2qJltWXBBVcIV5M")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Хранилище задач: {user_id: [{"id": 1, "text": "...", "done": False}]}
 user_tasks = {}
 last_main_message = {}
 
@@ -20,8 +20,9 @@ class AddTask(StatesGroup):
 class DeleteTask(StatesGroup):
     waiting_for_id = State()
 
+class DoneTask(StatesGroup):
+    waiting_for_id = State()
 
-# ───────────────────────── Клавиатуры ─────────────────────────
 
 def main_menu_keyboard():
     return types.InlineKeyboardMarkup(inline_keyboard=[
@@ -35,9 +36,6 @@ def back_keyboard():
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
-
-
-# ───────────────────────── Список задач ─────────────────────────
 
 def format_tasks(user_id: int) -> str:
     tasks = user_tasks.get(user_id, [])
@@ -53,8 +51,6 @@ def next_id(user_id: int) -> int:
     tasks = user_tasks.get(user_id, [])
     return max((t["id"] for t in tasks), default=0) + 1
 
-
-# ───────────────────────── /start ─────────────────────────
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -75,8 +71,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
     )
     last_main_message[user_id] = sent.message_id
 
-
-# ───────────────────────── Коллбэки ─────────────────────────
 
 @dp.callback_query()
 async def handle_callbacks(callback: types.CallbackQuery, state: FSMContext):
@@ -105,25 +99,21 @@ async def handle_callbacks(callback: types.CallbackQuery, state: FSMContext):
         await state.set_state(AddTask.waiting_for_text)
 
     elif data == "delete":
-        tasks_text = format_tasks(user_id)
         await callback.message.edit_text(
-            f"{tasks_text}\n\n🗑 Введите номер задачи для удаления:",
+            f"{format_tasks(user_id)}\n\n🗑 Введите номер задачи для удаления:",
             reply_markup=back_keyboard()
         )
         await state.set_state(DeleteTask.waiting_for_id)
 
     elif data == "done":
-        tasks_text = format_tasks(user_id)
         await callback.message.edit_text(
-            f"{tasks_text}\n\n✅ Введите номер задачи для отметки:",
+            f"{format_tasks(user_id)}\n\n✅ Введите номер задачи для отметки:",
             reply_markup=back_keyboard()
         )
-        await state.set_state(DeleteTask.waiting_for_id)  # переиспользуем состояние
+        await state.set_state(DoneTask.waiting_for_id)
 
     await callback.answer()
 
-
-# ───────────────────────── Ввод текста ─────────────────────────
 
 @dp.message(AddTask.waiting_for_text)
 async def process_add_task(message: types.Message, state: FSMContext):
@@ -136,16 +126,15 @@ async def process_add_task(message: types.Message, state: FSMContext):
 
     task_id = next_id(user_id)
     user_tasks[user_id].append({"id": task_id, "text": text, "done": False})
-
     await state.clear()
 
-    # Обновляем главное сообщение
     try:
         await bot.edit_message_text(
             chat_id=user_id,
             message_id=last_main_message[user_id],
             text=f"✅ Задача добавлена!\n\n{format_tasks(user_id)}",
-            reply_markup=main_menu_keyboard()
+            reply_markup=main_menu_keyboard(),
+            parse_mode="HTML"
         )
     except Exception:
         pass
@@ -159,34 +148,75 @@ async def process_delete_task(message: types.Message, state: FSMContext):
     try:
         task_id = int(message.text.strip())
     except ValueError:
+        await bot.edit_message_text(
+            chat_id=user_id,
+            message_id=last_main_message[user_id],
+            text="❌ Введите число!\n\n" + format_tasks(user_id),
+            reply_markup=back_keyboard()
+        )
         return
 
     tasks = user_tasks.get(user_id, [])
     task = next((t for t in tasks if t["id"] == task_id), None)
 
     if not task:
-        return
-
-    # Если пришли из "done" — отмечаем выполненной, иначе удаляем
-    current_state = await state.get_state()
-    if current_state == "DeleteTask:waiting_for_id":
-        user_tasks[user_id] = [t for t in tasks if t["id"] != task_id]
-        action_text = "🗑 Задача удалена!"
-    else:
-        task["done"] = not task["done"]
-        action_text = "✅ Статус задачи обновлён!"
-
-    await state.clear()
-
-    try:
         await bot.edit_message_text(
             chat_id=user_id,
             message_id=last_main_message[user_id],
-            text=f"{action_text}\n\n{format_tasks(user_id)}",
-            reply_markup=main_menu_keyboard()
+            text="❌ Задача не найдена!\n\n" + format_tasks(user_id),
+            reply_markup=back_keyboard()
         )
-    except Exception:
-        pass
+        return
+
+    user_tasks[user_id] = [t for t in tasks if t["id"] != task_id]
+    await state.clear()
+
+    await bot.edit_message_text(
+        chat_id=user_id,
+        message_id=last_main_message[user_id],
+        text=f"🗑 Задача удалена!\n\n{format_tasks(user_id)}",
+        reply_markup=main_menu_keyboard()
+    )
+
+
+@dp.message(DoneTask.waiting_for_id)
+async def process_done_task(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    await message.delete()
+
+    try:
+        task_id = int(message.text.strip())
+    except ValueError:
+        await bot.edit_message_text(
+            chat_id=user_id,
+            message_id=last_main_message[user_id],
+            text="❌ Введите число!\n\n" + format_tasks(user_id),
+            reply_markup=back_keyboard()
+        )
+        return
+
+    tasks = user_tasks.get(user_id, [])
+    task = next((t for t in tasks if t["id"] == task_id), None)
+
+    if not task:
+        await bot.edit_message_text(
+            chat_id=user_id,
+            message_id=last_main_message[user_id],
+            text="❌ Задача не найдена!\n\n" + format_tasks(user_id),
+            reply_markup=back_keyboard()
+        )
+        return
+
+    task["done"] = not task["done"]
+    status = "выполнена ✅" if task["done"] else "не выполнена 🔲"
+    await state.clear()
+
+    await bot.edit_message_text(
+        chat_id=user_id,
+        message_id=last_main_message[user_id],
+        text=f"Задача отмечена как {status}\n\n{format_tasks(user_id)}",
+        reply_markup=main_menu_keyboard()
+    )
 
 
 async def main():
